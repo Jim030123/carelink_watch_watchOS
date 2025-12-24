@@ -1,56 +1,87 @@
 package com.example.carelink.presentation
 
 import android.app.*
-import android.content.Intent
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
+import android.content.*
+import android.hardware.*
 import android.media.AudioAttributes
 import android.media.SoundPool
 import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.carelink.R
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 class FallDetectService : Service(), SensorEventListener {
 
     // ===============================
-    // Sensor
+    // 防重复触发
+    // ===============================
+    private var alertTriggered = false
+
+    // ===============================
+    // 传感器
     // ===============================
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
 
     // ===============================
-    // Sound
+    // 跌倒参数（Galaxy Watch 稳定）
+    // ===============================
+    private val FREE_FALL_THRESHOLD = 5f
+    private val IMPACT_THRESHOLD = 25f
+    private val STILL_THRESHOLD = 11f
+    private val STILL_TIME_MS = 1500L
+
+    private var lastResetTime = 0L
+    private val RESET_COOLDOWN_MS = 2000L
+
+
+    // ===============================
+    // 状态机
+    // ===============================
+    private var inFreeFall = false
+    private var impactDetected = false
+    private var stillStartTime = 0L
+    private var fallHandled = false
+
+    // ===============================
+    // 声音 & 震动
     // ===============================
     private lateinit var soundPool: SoundPool
-    private var alertSoundId: Int = 0
+    private var alertSoundId = 0
 
     // ===============================
-    // Fall detection state
+    // 重置广播（来自 CountdownActivity）
     // ===============================
-    private var freeFallDetected = false
-    private var impactDetected = false
-    private var impactTime: Long = 0
+    private val resetReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Log.e("FALL", "RESET RECEIVED")
+            resetAll()
+        }
+    }
 
-    // Thresholds (tunable)
-    private val FREE_FALL_THRESHOLD = 6.5f      // < 0.5g
-    private val IMPACT_THRESHOLD = 30f         // > 2.5g
-    private val STILL_THRESHOLD = 12f          // ~1g
-    private val STILL_TIME_MS = 2000L           // 1.5s
+
+
+
+
+
 
     // ===============================
-    // Lifecycle
+    // 生命周期
     // ===============================
     override fun onCreate() {
         super.onCreate()
 
-        // 🔥 必须：立刻进入前台
         startForeground(1001, createNotification())
 
-        // 🔊 初始化警报音（后台允许）
+        registerReceiver(
+            resetReceiver,
+            IntentFilter("ACTION_FALL_ALERT_RESET"),
+            Context.RECEIVER_NOT_EXPORTED
+        )
+
+
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ALARM)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
@@ -61,22 +92,14 @@ class FallDetectService : Service(), SensorEventListener {
             .setAudioAttributes(audioAttributes)
             .build()
 
-        // ⚠️ 你需要在 res/raw/ 放一个 fall_alert.wav
         alertSoundId = soundPool.load(this, R.raw.fall_alert, 1)
 
-        // 🧭 初始化传感器
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
         accelerometer?.let {
-            sensorManager.registerListener(
-                this,
-                it,
-                SensorManager.SENSOR_DELAY_GAME
-            )
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
         }
-
-        Log.d("FallDetectService", "Service started")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -84,17 +107,27 @@ class FallDetectService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        unregisterReceiver(resetReceiver)
         sensorManager.unregisterListener(this)
         soundPool.release()
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     // ===============================
-    // Sensor callback (3-stage fall detection)
+    // 跌倒检测核心
     // ===============================
     override fun onSensorChanged(event: SensorEvent) {
+
+
+            if (System.currentTimeMillis() - lastResetTime < RESET_COOLDOWN_MS) {
+                return
+            }
+
+            // 原本的检测逻辑
+
+
         val x = event.values[0]
         val y = event.values[1]
         val z = event.values[2]
@@ -102,54 +135,81 @@ class FallDetectService : Service(), SensorEventListener {
         val magnitude = sqrt(x * x + y * y + z * z)
         val now = System.currentTimeMillis()
 
-        // ① Free fall
-        if (!freeFallDetected && magnitude < FREE_FALL_THRESHOLD) {
-            freeFallDetected = true
-            Log.d("FALL", "Free fall detected")
+        // 自由落体
+        if (!inFreeFall && magnitude < FREE_FALL_THRESHOLD) {
+            inFreeFall = true
+            impactDetected = false
+            stillStartTime = 0
+            fallHandled = false
             return
         }
 
-        // ② Impact
-        if (freeFallDetected && !impactDetected && magnitude > IMPACT_THRESHOLD) {
+        // 撞击
+        if (inFreeFall && !impactDetected && magnitude > IMPACT_THRESHOLD) {
             impactDetected = true
-            impactTime = now
-            Log.d("FALL", "Impact detected")
             return
         }
 
-        // ③ Stillness
-        if (impactDetected) {
-            val still = magnitude in 8f..STILL_THRESHOLD
-
-            if (still && now - impactTime > STILL_TIME_MS) {
-                Log.e("FALL", "FALL CONFIRMED")
-                strongAlert()
-                resetFallState()
-            }
-
-            // 超时清空，避免卡死
-            if (now - impactTime > 3000) {
-                resetFallState()
+        // 静止
+        if (impactDetected && !fallHandled) {
+            if (abs(magnitude - STILL_THRESHOLD) < 2f) {
+                if (stillStartTime == 0L) {
+                    stillStartTime = now
+                } else if (now - stillStartTime >= STILL_TIME_MS) {
+                    fallHandled = true
+                    triggerFallAlert()
+                }
+            } else {
+                stillStartTime = 0
             }
         }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    private fun resetFallState() {
-        freeFallDetected = false
-        impactDetected = false
-        impactTime = 0
+    // ===============================
+    // 跌倒确认
+    // ===============================
+    private fun triggerFallAlert() {
+        Log.e("FALL", "triggerFallAlert() CALLED")
+
+        if (alertTriggered) return
+        alertTriggered = true
+
+        strongVibrate()
+
+        soundPool.play(alertSoundId, 1f, 1f, 1, 0, 1f)
+
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        val wakeLock = powerManager.newWakeLock(
+            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            "CareLink:FallWakeLock"
+        )
+        wakeLock.acquire(3000)
+
+        val intent = Intent(this, CountdownActivity::class.java).apply {
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+            )
+        }
+
+        startActivity(intent)
     }
 
-    // ===============================
-    // Strong vibration + alarm sound
-    // ===============================
-    private fun strongAlert() {
-        // 📳 强震动
+    private fun resetState() {
+        inFreeFall = false
+        impactDetected = false
+        stillStartTime = 0
+        fallHandled = false
+        alertTriggered = false
+    }
+
+    private fun strongVibrate() {
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val vm = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
-            vm.defaultVibrator
+            val manager = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
+            manager.defaultVibrator
         } else {
             @Suppress("DEPRECATION")
             getSystemService(VIBRATOR_SERVICE) as Vibrator
@@ -169,24 +229,10 @@ class FallDetectService : Service(), SensorEventListener {
                 -1
             )
         )
-
-        // 🔊 警报音
-        soundPool.play(
-            alertSoundId,
-            1f,
-            1f,
-            1,
-            0,
-            1f
-        )
     }
 
-    // ===============================
-    // Foreground notification
-    // ===============================
     private fun createNotification(): Notification {
         val channelId = "fall_detect_channel"
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
@@ -204,4 +250,17 @@ class FallDetectService : Service(), SensorEventListener {
             .setOngoing(true)
             .build()
     }
+    private fun resetAll() {
+        Log.e("FALL", "FULL RESET")
+
+        inFreeFall = false
+        impactDetected = false
+        stillStartTime = 0
+        fallHandled = false
+        alertTriggered = false
+
+        // ⭐ 关键：给状态机一个“冷却期”
+        lastResetTime = System.currentTimeMillis()
+    }
 }
+
