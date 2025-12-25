@@ -59,11 +59,19 @@ class FallDetectService : Service(), SensorEventListener {
     private var alertSoundId = 0
 
     // ===============================
+    // 延迟发送 RTC 的 Handler
+    // ===============================
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var rtcRunnable: Runnable? = null
+
+    // ===============================
     // 重置广播监听器
     // ===============================
     private val resetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             Log.e("FALL", ">>> RESET SIGNAL RECEIVED <<<")
+            // ⭐ 核心逻辑：如果用户点了“我没事”，取消 10 秒后的 RTC 发送
+            cancelRtcSending()
             resetAll()
         }
     }
@@ -72,13 +80,11 @@ class FallDetectService : Service(), SensorEventListener {
         super.onCreate()
         Log.d("FALL", "FallDetectService Created")
 
-        // 1. 初始化 RTC 客户端并连接
         rtcClient = RtcSignalClient()
         rtcClient.connect()
 
         startForeground(1001, createNotification())
 
-        // 兼容性注册广播
         val filter = IntentFilter("ACTION_FALL_ALERT_RESET")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(resetReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -86,7 +92,6 @@ class FallDetectService : Service(), SensorEventListener {
             registerReceiver(resetReceiver, filter)
         }
 
-        // 初始化声音
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ALARM)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
@@ -94,7 +99,6 @@ class FallDetectService : Service(), SensorEventListener {
         soundPool = SoundPool.Builder().setMaxStreams(1).setAudioAttributes(audioAttributes).build()
         alertSoundId = soundPool.load(this, R.raw.fall_alert, 1)
 
-        // 初始化传感器
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         accelerometer?.let {
@@ -107,6 +111,7 @@ class FallDetectService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
+        cancelRtcSending()
         try {
             unregisterReceiver(resetReceiver)
         } catch (e: Exception) {
@@ -172,8 +177,12 @@ class FallDetectService : Service(), SensorEventListener {
 
         Log.e("FALL", "!!! FALL ALERT TRIGGERED !!!")
 
-        // 🚀 发送 RTC 跌倒信号
-        rtcClient.sendFallAlert(userId = "elder_001")
+        // ⏱️ 修改：不再立即发送，而是排队等待 10 秒
+        rtcRunnable = Runnable {
+            Log.e("RTC", "10 seconds passed, sending FALL_ALERT to server...")
+            rtcClient.sendFallAlert(userId = "elder_001")
+        }
+        mainHandler.postDelayed(rtcRunnable!!, 10000)
 
         strongVibrate()
         soundPool.play(alertSoundId, 1f, 1f, 1, 0, 1f)
@@ -184,6 +193,14 @@ class FallDetectService : Service(), SensorEventListener {
 
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(1001, createNotification())
+    }
+
+    private fun cancelRtcSending() {
+        rtcRunnable?.let {
+            Log.d("RTC", "User handled the alert, canceling RTC send task.")
+            mainHandler.removeCallbacks(it)
+        }
+        rtcRunnable = null
     }
 
     private fun resetStateVariables() {
