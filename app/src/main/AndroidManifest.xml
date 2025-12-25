@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -27,7 +30,6 @@
         android:theme="@android:style/Theme.DeviceDefault"
         android:usesCleartextTraffic="true">
 
-        <!-- ✅ 开机自启 Receiver（一定要在 application 里） -->
         <receiver
             android:name=".presentation.BootReceiver"
             android:exported="false">
@@ -36,13 +38,11 @@
             </intent-filter>
         </receiver>
 
-        <!-- 前台跌倒检测服务 -->
         <service
             android:name=".presentation.FallDetectService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- 主 Activity -->
         <activity
             android:name=".presentation.MainActivity"
             android:exported="true">
@@ -60,7 +60,6 @@
             android:excludeFromRecents="true"
             android:launchMode="singleInstance" />
 
-        <!-- Wear OS 必须 -->
         <uses-library
             android:name="com.google.android.wearable"
             android:required="true" />

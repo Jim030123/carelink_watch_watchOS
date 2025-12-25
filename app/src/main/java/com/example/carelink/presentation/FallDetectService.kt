@@ -9,6 +9,7 @@ import android.media.SoundPool
 import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.example.carelink.R
 import kotlin.math.abs
 import kotlin.math.sqrt
@@ -32,7 +33,7 @@ class FallDetectService : Service(), SensorEventListener {
     private var accelerometer: Sensor? = null
 
     // ===============================
-    // 跌倒参数（Galaxy Watch 稳定）
+    // 跌倒参数
     // ===============================
     private val FREE_FALL_THRESHOLD = 5f
     private val IMPACT_THRESHOLD = 25f
@@ -70,7 +71,6 @@ class FallDetectService : Service(), SensorEventListener {
     private val resetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             Log.e("FALL", ">>> RESET SIGNAL RECEIVED <<<")
-            // ⭐ 核心逻辑：如果用户点了“我没事”，取消 10 秒后的 RTC 发送
             cancelRtcSending()
             resetAll()
         }
@@ -80,17 +80,20 @@ class FallDetectService : Service(), SensorEventListener {
         super.onCreate()
         Log.d("FALL", "FallDetectService Created")
 
-        rtcClient = RtcSignalClient()
+        // 1. 初始化 RTC 客户端
+        rtcClient = RtcSignalClient(this)
         rtcClient.connect()
 
         startForeground(1001, createNotification())
 
+        // ✅ 使用 ContextCompat 修复 API 34+ 的广播注册警告
         val filter = IntentFilter("ACTION_FALL_ALERT_RESET")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(resetReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(resetReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            this,
+            resetReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ALARM)
@@ -177,10 +180,11 @@ class FallDetectService : Service(), SensorEventListener {
 
         Log.e("FALL", "!!! FALL ALERT TRIGGERED !!!")
 
-        // ⏱️ 修改：不再立即发送，而是排队等待 10 秒
+        // ⏱️ 延迟 10 秒后发送 JSON 并开启 WebRTC 音频通话
         rtcRunnable = Runnable {
-            Log.e("RTC", "10 seconds passed, sending FALL_ALERT to server...")
-            rtcClient.sendFallAlert(userId = "elder_001")
+            Log.e("RTC", "10 seconds passed, sending FALL_ALERT and starting WebRTC...")
+            rtcClient.sendFallAlert(userId = "CG-003")
+            rtcClient.startWebRtcCall()
         }
         mainHandler.postDelayed(rtcRunnable!!, 10000)
 
@@ -197,7 +201,7 @@ class FallDetectService : Service(), SensorEventListener {
 
     private fun cancelRtcSending() {
         rtcRunnable?.let {
-            Log.d("RTC", "User handled the alert, canceling RTC send task.")
+            Log.d("RTC", "User handled the alert, canceling RTC task.")
             mainHandler.removeCallbacks(it)
         }
         rtcRunnable = null

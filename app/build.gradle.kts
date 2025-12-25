@@ -37,6 +37,13 @@ android {
     buildFeatures {
         compose = true
     }
+    
+    // 强制处理 native 库冲突（以防万一）
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
 }
 
 dependencies {
@@ -51,8 +58,10 @@ dependencies {
     implementation(libs.activity.compose)
     implementation(libs.core.splashscreen)
     implementation(libs.okhttp)
-    androidTestImplementation(platform(libs.compose.bom))
-    androidTestImplementation(libs.ui.test.junit4)
+    implementation("org.jitsi:webrtc:124.0.0")
+
     debugImplementation(libs.ui.tooling)
     debugImplementation(libs.ui.test.manifest)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.ui.test.junit4)
 }
