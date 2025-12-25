@@ -3,6 +3,7 @@ package com.example.carelink.presentation
 import android.annotation.SuppressLint
 import android.app.*
 import android.content.*
+import android.content.pm.ServiceInfo
 import android.hardware.*
 import android.media.AudioAttributes
 import android.media.SoundPool
@@ -39,7 +40,6 @@ class FallDetectService : Service(), SensorEventListener {
     private val IMPACT_THRESHOLD = 25f
     private val STILL_THRESHOLD = 11f
     private val STILL_TIME_MS = 1500L
-    private val FALL_TIMEOUT_MS = 5000L 
 
     private var lastResetTime = 0L
     private val RESET_COOLDOWN_MS = 2000L
@@ -58,6 +58,7 @@ class FallDetectService : Service(), SensorEventListener {
     // ===============================
     private lateinit var soundPool: SoundPool
     private var alertSoundId = 0
+    private var alertStreamId = 0
 
     // ===============================
     // 延迟发送 RTC 的 Handler
@@ -71,6 +72,7 @@ class FallDetectService : Service(), SensorEventListener {
     private val resetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             Log.e("FALL", ">>> RESET SIGNAL RECEIVED <<<")
+            stopAlertSound()
             cancelRtcSending()
             resetAll()
         }
@@ -84,9 +86,18 @@ class FallDetectService : Service(), SensorEventListener {
         rtcClient = RtcSignalClient(this)
         rtcClient.connect()
 
-        startForeground(1001, createNotification())
+        // ✅ API 34+ 必须显式指定 FOREGROUND_SERVICE_TYPE_MICROPHONE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                1001, 
+                createNotification(), 
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(1001, createNotification())
+        }
 
-        // ✅ 使用 ContextCompat 修复 API 34+ 的广播注册警告
+        // 注册重置广播
         val filter = IntentFilter("ACTION_FALL_ALERT_RESET")
         ContextCompat.registerReceiver(
             this,
@@ -114,6 +125,7 @@ class FallDetectService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
+        stopAlertSound()
         cancelRtcSending()
         try {
             unregisterReceiver(resetReceiver)
@@ -136,11 +148,6 @@ class FallDetectService : Service(), SensorEventListener {
         val z = event.values[2]
         val magnitude = sqrt(x * x + y * y + z * z)
         val now = System.currentTimeMillis()
-
-        if (inFreeFall && (now - fallStartTime > FALL_TIMEOUT_MS)) {
-            Log.d("FALL", "Timeout reset")
-            resetStateVariables()
-        }
 
         if (!inFreeFall && magnitude < FREE_FALL_THRESHOLD) {
             inFreeFall = true
@@ -182,14 +189,15 @@ class FallDetectService : Service(), SensorEventListener {
 
         // ⏱️ 延迟 10 秒后发送 JSON 并开启 WebRTC 音频通话
         rtcRunnable = Runnable {
-            Log.e("RTC", "10 seconds passed, sending FALL_ALERT and starting WebRTC...")
+            Log.e("RTC", "10 seconds passed, stopping alert sound and starting WebRTC...")
+            stopAlertSound() // 🛑 关键：启动通话前必须停止报警音，释放音频轨道
             rtcClient.sendFallAlert(userId = "CG-003")
             rtcClient.startWebRtcCall()
         }
         mainHandler.postDelayed(rtcRunnable!!, 10000)
 
         strongVibrate()
-        soundPool.play(alertSoundId, 1f, 1f, 1, 0, 1f)
+        alertStreamId = soundPool.play(alertSoundId, 1f, 1f, 1, 0, 1f)
 
         val intent = Intent(this, CountdownActivity::class.java)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -199,9 +207,16 @@ class FallDetectService : Service(), SensorEventListener {
         nm.notify(1001, createNotification())
     }
 
+    private fun stopAlertSound() {
+        if (alertStreamId != 0) {
+            soundPool.stop(alertStreamId)
+            alertStreamId = 0
+        }
+    }
+
     private fun cancelRtcSending() {
         rtcRunnable?.let {
-            Log.d("RTC", "User handled the alert, canceling RTC task.")
+            Log.d("RTC", "Task canceled.")
             mainHandler.removeCallbacks(it)
         }
         rtcRunnable = null
@@ -215,10 +230,14 @@ class FallDetectService : Service(), SensorEventListener {
     }
 
     private fun resetAll() {
-        Log.e("FALL", "Resetting all states for next detection...")
+        Log.e("FALL", "Resetting all states...")
         resetStateVariables()
         alertTriggered = false
         lastResetTime = System.currentTimeMillis()
+        
+        // 更新通知状态
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(1001, createNotification())
     }
 
     private fun strongVibrate() {
@@ -248,6 +267,7 @@ class FallDetectService : Service(), SensorEventListener {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setFullScreenIntent(pendingIntent, true)
+            .setOngoing(true)
             .build()
     }
 }

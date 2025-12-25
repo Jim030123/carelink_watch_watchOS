@@ -13,6 +13,7 @@ class CountdownActivity : Activity() {
 
     private var remaining = 10
     private var resetSent = false
+    private var isTimeout = false
 
     private lateinit var handler: Handler
     private lateinit var countdownText: TextView
@@ -24,9 +25,9 @@ class CountdownActivity : Activity() {
             updateText()
 
             if (remaining <= 0) {
-                Log.w("FALL", "Countdown finished - Notifying emergency contacts")
-                // 这里可以添加发送紧急短信/API的逻辑
-                sendResetOnce()
+                Log.w("FALL", "Countdown finished - Proceeding to Emergency Call")
+                isTimeout = true
+                // 🛑 核心修改：倒计时结束不再发送 Reset 广播，让 Service 继续执行通话逻辑
                 finish()
             } else {
                 handler.postDelayed(this, 1000)
@@ -53,7 +54,7 @@ class CountdownActivity : Activity() {
         updateText()
 
         okButton.setOnClickListener {
-            Log.d("FALL", "User clicked OK - Canceling alert")
+            Log.d("FALL", "User clicked 'I'm OK' - Canceling alert")
             sendResetOnce()
             finish()
         }
@@ -62,12 +63,16 @@ class CountdownActivity : Activity() {
     }
 
     /**
-     * 非常重要：如果用户通过手势滑动关闭了 Activity 而没点按钮，
-     * 我们也要发送重置广播，否则 Service 会一直卡在 alertTriggered = true 状态。
+     * 修改 onDestroy 逻辑：
+     * 只有当用户主动关闭（如点击按钮或手势返回）时才重置。
+     * 如果是倒计时超时自动关闭，则不触发重置，以允许通话继续。
      */
     override fun onDestroy() {
-        Log.d("FALL", "CountdownActivity onDestroy")
-        sendResetOnce()
+        Log.d("FALL", "CountdownActivity onDestroy (isTimeout=$isTimeout)")
+        if (!isTimeout) {
+            // 如果不是因为超时结束的，说明用户可能手动取消了（点按钮或返回键）
+            sendResetOnce()
+        }
         handler.removeCallbacksAndMessages(null)
         super.onDestroy()
     }
@@ -82,7 +87,6 @@ class CountdownActivity : Activity() {
 
         Log.e("FALL", ">>> SENDING RESET BROADCAST TO SERVICE <<<")
         val intent = Intent("ACTION_FALL_ALERT_RESET")
-        // 明确指定包名，增加安全性，确保 Service 必能收到
         intent.setPackage(packageName) 
         sendBroadcast(intent)
     }
