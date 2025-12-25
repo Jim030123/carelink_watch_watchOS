@@ -24,7 +24,8 @@ class CountdownActivity : Activity() {
             updateText()
 
             if (remaining <= 0) {
-                Log.w("FALL", "Countdown finished")
+                Log.w("FALL", "Countdown finished - Notifying emergency contacts")
+                // 这里可以添加发送紧急短信/API的逻辑
                 sendResetOnce()
                 finish()
             } else {
@@ -36,7 +37,7 @@ class CountdownActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 🔥 非常重要：保证在锁屏 / 息屏 / 手表抬腕都能显示
+        // 保持屏幕常亮并在锁屏上显示
         window.addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
@@ -47,45 +48,42 @@ class CountdownActivity : Activity() {
 
         countdownText = findViewById(R.id.countdownText)
         okButton = findViewById(R.id.okButton)
-
         handler = Handler(Looper.getMainLooper())
 
         updateText()
 
-        Log.d("FALL", "CountdownActivity started")
-
         okButton.setOnClickListener {
-            Log.d("FALL", "User clicked I'M OK")
+            Log.d("FALL", "User clicked OK - Canceling alert")
             sendResetOnce()
             finish()
         }
 
-        // ⏱ 延迟 1 秒启动，避免 Activity 刚创建就被系统 pause
         handler.postDelayed(countdownRunnable, 1000)
     }
 
+    /**
+     * 非常重要：如果用户通过手势滑动关闭了 Activity 而没点按钮，
+     * 我们也要发送重置广播，否则 Service 会一直卡在 alertTriggered = true 状态。
+     */
     override fun onDestroy() {
-        Log.d("FALL", "CountdownActivity destroyed")
+        Log.d("FALL", "CountdownActivity onDestroy")
+        sendResetOnce()
         handler.removeCallbacksAndMessages(null)
         super.onDestroy()
     }
 
-    // ===============================
-    // 工具方法
-    // ===============================
-
     private fun updateText() {
-        countdownText.text = "检测到跌倒\n$remaining 秒后将通知照护者"
+        countdownText.text = "检测到疑似跌倒\n\n$remaining 秒后将发出求救"
     }
 
     private fun sendResetOnce() {
         if (resetSent) return
         resetSent = true
 
-        Log.e("FALL", "SEND RESET BROADCAST")
-
-        sendBroadcast(
-            Intent("ACTION_FALL_ALERT_RESET")
-        )
+        Log.e("FALL", ">>> SENDING RESET BROADCAST TO SERVICE <<<")
+        val intent = Intent("ACTION_FALL_ALERT_RESET")
+        // 明确指定包名，增加安全性，确保 Service 必能收到
+        intent.setPackage(packageName) 
+        sendBroadcast(intent)
     }
 }
