@@ -78,7 +78,7 @@ class CountdownActivity : Activity() {
     }
 
     private fun updateText() {
-        countdownText.text = "检测到疑似跌倒\n\n$remaining 秒后将发出求救"
+        countdownText.text = "Emergency call in $remaining seconds"
     }
 
     private fun sendResetOnce() {

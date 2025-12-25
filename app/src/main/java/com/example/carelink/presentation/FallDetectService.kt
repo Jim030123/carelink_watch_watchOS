@@ -18,25 +18,16 @@ import kotlin.math.sqrt
 
 class FallDetectService : Service(), SensorEventListener {
 
-    // ===============================
-    // RTC 信令客户端
-    // ===============================
-    private lateinit var rtcClient: RtcSignalClient
+    // 渠道 ID 常量
+    private val CHANNEL_ID_MONITOR = "fall_monitor_channel" // 平时监测
+    private val CHANNEL_ID_ALERT = "fall_alert_channel"     // 紧急报警
 
-    // ===============================
-    // 防重复触发标志位
-    // ===============================
+    private lateinit var rtcClient: RtcSignalClient
     private var alertTriggered = false
 
-    // ===============================
-    // 传感器
-    // ===============================
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
 
-    // ===============================
-    // 跌倒参数
-    // ===============================
     private val FREE_FALL_THRESHOLD = 5f
     private val IMPACT_THRESHOLD = 25f
     private val STILL_THRESHOLD = 11f
@@ -45,31 +36,19 @@ class FallDetectService : Service(), SensorEventListener {
     private var lastResetTime = 0L
     private val RESET_COOLDOWN_MS = 2000L
 
-    // ===============================
-    // 状态机
-    // ===============================
     private var inFreeFall = false
     private var impactDetected = false
     private var stillStartTime = 0L
     private var fallHandled = false
     private var fallStartTime = 0L 
 
-    // ===============================
-    // 声音 & 震动
-    // ===============================
     private lateinit var soundPool: SoundPool
     private var alertSoundId = 0
     private var alertStreamId = 0
 
-    // ===============================
-    // 延迟发送 RTC 的 Handler
-    // ===============================
     private val mainHandler = Handler(Looper.getMainLooper())
     private var rtcRunnable: Runnable? = null
 
-    // ===============================
-    // 重置广播监听器
-    // ===============================
     private val resetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             Log.e("FALL", ">>> RESET SIGNAL RECEIVED <<<")
@@ -83,11 +62,13 @@ class FallDetectService : Service(), SensorEventListener {
         super.onCreate()
         Log.d("FALL", "FallDetectService Created")
 
-        // 1. 初始化 RTC 客户端
         rtcClient = RtcSignalClient(this)
         rtcClient.connect()
 
-        // ✅ API 34+ 必须显式指定 FOREGROUND_SERVICE_TYPE_MICROPHONE
+        // 1. 预先创建两个渠道
+        createNotificationChannels()
+
+        // 2. 初始使用监测渠道启动前台服务
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 1001, 
@@ -98,7 +79,6 @@ class FallDetectService : Service(), SensorEventListener {
             startForeground(1001, createNotification())
         }
 
-        // 注册重置广播
         val filter = IntentFilter("ACTION_FALL_ALERT_RESET")
         ContextCompat.registerReceiver(
             this,
@@ -121,9 +101,38 @@ class FallDetectService : Service(), SensorEventListener {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return START_STICKY
+    private fun createNotificationChannels() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(NotificationManager::class.java)
+            
+            // 监测渠道：静默，低优先级
+            val monitorChannel = NotificationChannel(
+                CHANNEL_ID_MONITOR, 
+                "跌倒监测状态", 
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "显示跌倒监测是否正在运行"
+                setShowBadge(false)
+            }
+            
+            // 报警渠道：高优先级，必须弹出
+            val alertChannel = NotificationChannel(
+                CHANNEL_ID_ALERT, 
+                "跌倒紧急报警", 
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "检测到跌倒时的紧急提醒"
+                enableVibration(true)
+                setBypassDnd(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+            
+            nm.createNotificationChannel(monitorChannel)
+            nm.createNotificationChannel(alertChannel)
+        }
     }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
         stopAlertSound()
@@ -144,18 +153,12 @@ class FallDetectService : Service(), SensorEventListener {
         if (alertTriggered) return
         if (System.currentTimeMillis() - lastResetTime < RESET_COOLDOWN_MS) return
 
-        val x = event.values[0]
-        val y = event.values[1]
-        val z = event.values[2]
-        val magnitude = sqrt(x * x + y * y + z * z)
+        val magnitude = sqrt(event.values[0] * event.values[0] + event.values[1] * event.values[1] + event.values[2] * event.values[2])
         val now = System.currentTimeMillis()
 
         if (!inFreeFall && magnitude < FREE_FALL_THRESHOLD) {
             inFreeFall = true
             fallStartTime = now
-            impactDetected = false
-            stillStartTime = 0
-            fallHandled = false
             Log.d("FALL", "Stage 1: Fall detected")
             return
         }
@@ -188,14 +191,16 @@ class FallDetectService : Service(), SensorEventListener {
 
         Log.e("FALL", "!!! FALL ALERT TRIGGERED !!!")
 
-        // ⏱️ 延迟 10 秒后发送 JSON 并开启 WebRTC 音频通话
+        // 🚨 切换到高优先级通知，触发全屏 UI
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(1001, createNotification())
+
         rtcRunnable = Runnable {
-            Log.e("RTC", "10 seconds passed, stopping alert sound and starting WebRTC...")
+            Log.e("RTC", "Starting WebRTC...")
             stopAlertSound() 
             rtcClient.sendFallAlert(userId = "CG-003")
             rtcClient.startWebRtcCall()
 
-            // ✅ 通话启动后跳转到挂断页面
             val hangUpIntent = Intent(this, HangUpActivity::class.java)
             hangUpIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             startActivity(hangUpIntent)
@@ -205,12 +210,10 @@ class FallDetectService : Service(), SensorEventListener {
         strongVibrate()
         alertStreamId = soundPool.play(alertSoundId, 1f, 1f, 1, 0, 1f)
 
+        // 双重保险：显式启动 Activity
         val intent = Intent(this, CountdownActivity::class.java)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         startActivity(intent)
-
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(1001, createNotification())
     }
 
     private fun stopAlertSound() {
@@ -221,10 +224,7 @@ class FallDetectService : Service(), SensorEventListener {
     }
 
     private fun cancelRtcSending() {
-        rtcRunnable?.let {
-            Log.d("RTC", "Task canceled.")
-            mainHandler.removeCallbacks(it)
-        }
+        rtcRunnable?.let { mainHandler.removeCallbacks(it) }
         rtcRunnable = null
     }
 
@@ -241,7 +241,7 @@ class FallDetectService : Service(), SensorEventListener {
         alertTriggered = false
         lastResetTime = System.currentTimeMillis()
         
-        // 更新通知状态
+        // ✅ 重置回低优先级监测渠道
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(1001, createNotification())
     }
@@ -257,23 +257,27 @@ class FallDetectService : Service(), SensorEventListener {
 
     @SuppressLint("FullScreenIntentPolicy")
     private fun createNotification(): Notification {
-        val channelId = "fall_detect_channel"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "Fall Detection", NotificationManager.IMPORTANCE_HIGH)
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        }
-
-        val intent = Intent(this, CountdownActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-
-        return NotificationCompat.Builder(this, channelId)
+        // 根据状态选择渠道
+        val currentChannelId = if (alertTriggered) CHANNEL_ID_ALERT else CHANNEL_ID_MONITOR
+        
+        val builder = NotificationCompat.Builder(this, currentChannelId)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentTitle("CareLink 跌倒提醒")
             .setContentText(if (alertTriggered) "检测到跌倒！" else "跌倒监测运行中")
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setFullScreenIntent(pendingIntent, true)
             .setOngoing(true)
-            .build()
+            .setOnlyAlertOnce(!alertTriggered) // 监测状态不响铃
+
+        if (alertTriggered) {
+            val intent = Intent(this, CountdownActivity::class.java)
+            val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            builder.setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setFullScreenIntent(pendingIntent, true)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        } else {
+            builder.setPriority(NotificationCompat.PRIORITY_LOW)
+        }
+
+        return builder.build()
     }
 }
