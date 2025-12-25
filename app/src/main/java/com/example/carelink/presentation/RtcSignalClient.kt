@@ -1,6 +1,7 @@
 package com.example.carelink.presentation
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioManager
 import android.util.Log
 import okhttp3.*
@@ -16,6 +17,7 @@ class RtcSignalClient(private val context: Context) {
     private var peerConnection: PeerConnection? = null
     private var factory: PeerConnectionFactory? = null
     private var localAudioTrack: AudioTrack? = null
+    private var audioSource: AudioSource? = null
 
     private val client: OkHttpClient = createUnsafeOkHttpClient()
     private val request = Request.Builder().url("ws://192.168.32.100:25101").build()
@@ -50,9 +52,6 @@ class RtcSignalClient(private val context: Context) {
         }
     }
 
-    /**
-     * ⭐ 仅创建 Track，不创建 Stream 对象，以符合 Unified Plan
-     */
     private fun createLocalAudioTrack() {
         if (factory == null) return
         
@@ -62,7 +61,7 @@ class RtcSignalClient(private val context: Context) {
             mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
         }
         
-        val audioSource = factory!!.createAudioSource(audioConstraints)
+        audioSource = factory!!.createAudioSource(audioConstraints)
         localAudioTrack = factory!!.createAudioTrack("ARDAMS0", audioSource)
         localAudioTrack?.setEnabled(true)
     }
@@ -90,6 +89,46 @@ class RtcSignalClient(private val context: Context) {
         webSocket?.send(json.toString())
     }
 
+    /**
+     * 🛑 结束通话并释放资源
+     * @param sendSignal 是否向服务器发送挂断指令。如果是收到对方挂断后执行清理，则设为 false。
+     */
+    fun endCall(sendSignal: Boolean = true) {
+        Log.e("RTC", "Shutting down RTC (sendSignal=$sendSignal)...")
+        try {
+            // 1. 根据需要发送 "end_call" 指令
+            if (sendSignal) {
+                val json = JSONObject().apply {
+                    put("type", "end_call")
+                    put("to", targetClientId)
+                }
+                webSocket?.send(json.toString())
+            }
+
+            // 2. 释放硬件和软件资源
+            peerConnection?.close()
+            peerConnection?.dispose()
+            peerConnection = null
+
+            localAudioTrack?.setEnabled(false)
+            localAudioTrack?.dispose()
+            localAudioTrack = null
+            
+            audioSource?.dispose()
+            audioSource = null
+
+            // 3. 恢复音频系统状态
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            audioManager.isMicrophoneMute = false 
+            audioManager.isSpeakerphoneOn = false
+            audioManager.mode = AudioManager.MODE_NORMAL
+
+            Log.d("RTC", "RTC Resources released.")
+        } catch (e: Exception) {
+            Log.e("RTC", "Error during endCall", e)
+        }
+    }
+
     fun startWebRtcCall() {
         Log.e("RTC", "🚀 Starting Call (Unified Plan)...")
         
@@ -100,7 +139,6 @@ class RtcSignalClient(private val context: Context) {
 
         createLocalAudioTrack()
 
-        // ⭐ 必须明确指定 UnifiedPlan
         val rtcConfig = PeerConnection.RTCConfiguration(
             listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
         ).apply {
@@ -120,11 +158,9 @@ class RtcSignalClient(private val context: Context) {
                 }
                 webSocket?.send(json.toString())
             }
-
             override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState) {
                 Log.d("RTC", "ICE State: $newState")
             }
-
             override fun onDataChannel(p0: DataChannel?) {}
             override fun onIceConnectionReceivingChange(p0: Boolean) {}
             override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
@@ -136,7 +172,6 @@ class RtcSignalClient(private val context: Context) {
             override fun onTrack(p0: RtpTransceiver?) {}
         })
 
-        // ⭐ 核心修复：使用 addTrack 并指定 Stream Label，不再使用 addStream
         localAudioTrack?.let {
             peerConnection?.addTrack(it, listOf("ARDAMS"))
         }
@@ -173,11 +208,10 @@ class RtcSignalClient(private val context: Context) {
             webSocket = ws
             joinRoom()
         }
-
         override fun onMessage(webSocket: WebSocket, text: String) {
             try {
                 val json = JSONObject(text)
-                when (json.optString("type")) {
+                when (val type = json.optString("type")) {
                     "answer" -> {
                         val answerData = json.getJSONObject("answer")
                         val sdp = answerData.getString("sdp")
@@ -197,10 +231,16 @@ class RtcSignalClient(private val context: Context) {
                         )
                         peerConnection?.addIceCandidate(candidate)
                     }
+                    "end_call", "reject_call" -> {
+                        Log.e("RTC", "Received $type from remote. Disposing call...")
+                        // 🚀 核心逻辑：通知 Service 进行全局重置
+                        val intent = Intent("ACTION_FALL_ALERT_RESET")
+                        intent.setPackage(context.packageName)
+                        context.sendBroadcast(intent)
+                    }
                 }
             } catch (e: Exception) {}
         }
-
         override fun onFailure(ws: WebSocket, t: Throwable, r: Response?) {
             Log.e("RTC", "❌ WS Failure", t)
             webSocket = null
