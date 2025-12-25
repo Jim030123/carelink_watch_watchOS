@@ -18,7 +18,7 @@ class RtcSignalClient(private val context: Context) {
     private var localAudioTrack: AudioTrack? = null
 
     private val client: OkHttpClient = createUnsafeOkHttpClient()
-    private val request = Request.Builder().url("ws://192.168.32.100:25101").build()
+    private val request = Request.Builder().url("ws://10.27.201.100:25101").build()
     private var webSocket: WebSocket? = null
     
     private val myClientId = "Watch-003"
