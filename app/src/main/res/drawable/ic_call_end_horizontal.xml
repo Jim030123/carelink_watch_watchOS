@@ -1,0 +1,42 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="36dp"
+    android:height="36dp"
+    android:viewportWidth="36"
+    android:viewportHeight="36">
+
+    <!-- 左听筒（加粗） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="
+            M4,14
+            h8
+            a2,2 0 0 1 2,2
+            v4
+            a2,2 0 0 1 -2,2
+            h-4
+            a4,4 0 0 1 -4,-4
+            z"/>
+
+    <!-- 右听筒（加粗） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="
+            M32,14
+            h-8
+            a2,2 0 0 0 -2,2
+            v4
+            a2,2 0 0 0 2,2
+            h4
+            a4,4 0 0 0 4,-4
+            z"/>
+
+    <!-- 中间连接（明显加粗） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="
+            M12,18
+            h12
+            v4
+            h-12
+            z"/>
+</vector>

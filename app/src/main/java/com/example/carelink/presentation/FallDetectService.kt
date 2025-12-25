@@ -12,6 +12,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.carelink.R
+import com.example.carelink.presentation.theme.HangUpActivity
 import kotlin.math.abs
 import kotlin.math.sqrt
 
@@ -190,9 +191,14 @@ class FallDetectService : Service(), SensorEventListener {
         // ⏱️ 延迟 10 秒后发送 JSON 并开启 WebRTC 音频通话
         rtcRunnable = Runnable {
             Log.e("RTC", "10 seconds passed, stopping alert sound and starting WebRTC...")
-            stopAlertSound() // 🛑 关键：启动通话前必须停止报警音，释放音频轨道
+            stopAlertSound() 
             rtcClient.sendFallAlert(userId = "CG-003")
             rtcClient.startWebRtcCall()
+
+            // ✅ 通话启动后跳转到挂断页面
+            val hangUpIntent = Intent(this, HangUpActivity::class.java)
+            hangUpIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            startActivity(hangUpIntent)
         }
         mainHandler.postDelayed(rtcRunnable!!, 10000)
 

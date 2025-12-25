@@ -61,6 +61,14 @@
             android:excludeFromRecents="true"
             android:launchMode="singleInstance" />
 
+        <activity
+            android:name=".presentation.theme.HangUpActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance" />
+
         <uses-library
             android:name="com.google.android.wearable"
             android:required="true" />
