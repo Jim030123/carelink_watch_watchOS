@@ -13,23 +13,17 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.carelink.R
 import com.example.carelink.presentation.theme.HangUpActivity
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.sqrt
 
 class FallDetectService : Service(), SensorEventListener {
 
-    private val CHANNEL_ID_MONITOR = "fall_monitor_channel"
-    private val CHANNEL_ID_ALERT = "fall_alert_channel"
-    
-    // 通知 ID 分离
-    private val NOTIF_ID_MONITOR = 1001
-    private val NOTIF_ID_ALERT = 1002
+    // 渠道 ID 常量
+    private val CHANNEL_ID_MONITOR = "fall_monitor_channel" // 平时监测
+    private val CHANNEL_ID_ALERT = "fall_alert_channel"     // 紧急报警
 
     private lateinit var rtcClient: RtcSignalClient
-    
-    // 使用 AtomicBoolean 确保线程安全，防止瞬间触发两次
-    private val alertTriggered = AtomicBoolean(false)
+    private var alertTriggered = false
 
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
@@ -71,17 +65,18 @@ class FallDetectService : Service(), SensorEventListener {
         rtcClient = RtcSignalClient(this)
         rtcClient.connect()
 
+        // 1. 预先创建两个渠道
         createNotificationChannels()
 
-        // 1. 初始启动：使用监测通知（ID 1001），不带全屏意图
+        // 2. 初始使用监测渠道启动前台服务
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
-                NOTIF_ID_MONITOR, 
-                createMonitorNotification(), 
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                1001, 
+                createNotification(), 
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             )
         } else {
-            startForeground(NOTIF_ID_MONITOR, createMonitorNotification())
+            startForeground(1001, createNotification())
         }
 
         val filter = IntentFilter("ACTION_FALL_ALERT_RESET")
@@ -109,11 +104,29 @@ class FallDetectService : Service(), SensorEventListener {
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NotificationManager::class.java)
-            val monitorChannel = NotificationChannel(CHANNEL_ID_MONITOR, "跌倒监测状态", NotificationManager.IMPORTANCE_LOW)
-            val alertChannel = NotificationChannel(CHANNEL_ID_ALERT, "跌倒紧急报警", NotificationManager.IMPORTANCE_HIGH).apply {
+            
+            // 监测渠道：静默，低优先级
+            val monitorChannel = NotificationChannel(
+                CHANNEL_ID_MONITOR, 
+                "跌倒监测状态", 
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "显示跌倒监测是否正在运行"
+                setShowBadge(false)
+            }
+            
+            // 报警渠道：高优先级，必须弹出
+            val alertChannel = NotificationChannel(
+                CHANNEL_ID_ALERT, 
+                "跌倒紧急报警", 
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "检测到跌倒时的紧急提醒"
                 enableVibration(true)
                 setBypassDnd(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
+            
             nm.createNotificationChannel(monitorChannel)
             nm.createNotificationChannel(alertChannel)
         }
@@ -124,7 +137,11 @@ class FallDetectService : Service(), SensorEventListener {
     override fun onDestroy() {
         stopAlertSound()
         cancelRtcSending()
-        try { unregisterReceiver(resetReceiver) } catch (e: Exception) {}
+        try {
+            unregisterReceiver(resetReceiver)
+        } catch (e: Exception) {
+            Log.e("FALL", "Unregister failed: ${e.message}")
+        }
         sensorManager.unregisterListener(this)
         soundPool.release()
         super.onDestroy()
@@ -133,7 +150,7 @@ class FallDetectService : Service(), SensorEventListener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onSensorChanged(event: SensorEvent) {
-        if (alertTriggered.get()) return
+        if (alertTriggered) return
         if (System.currentTimeMillis() - lastResetTime < RESET_COOLDOWN_MS) return
 
         val magnitude = sqrt(event.values[0] * event.values[0] + event.values[1] * event.values[1] + event.values[2] * event.values[2])
@@ -142,11 +159,13 @@ class FallDetectService : Service(), SensorEventListener {
         if (!inFreeFall && magnitude < FREE_FALL_THRESHOLD) {
             inFreeFall = true
             fallStartTime = now
+            Log.d("FALL", "Stage 1: Fall detected")
             return
         }
 
         if (inFreeFall && !impactDetected && magnitude > IMPACT_THRESHOLD) {
             impactDetected = true
+            Log.d("FALL", "Stage 2: Impact detected")
             return
         }
 
@@ -167,30 +186,18 @@ class FallDetectService : Service(), SensorEventListener {
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     private fun triggerFallAlert() {
-        // 原子操作检查，防止瞬间触发两次
-        if (!alertTriggered.compareAndSet(false, true)) return
+        if (alertTriggered) return
+        alertTriggered = true
 
         Log.e("FALL", "!!! FALL ALERT TRIGGERED !!!")
 
-        // 🚨 使用独立的通知 ID (1002) 发送报警，触发全屏 UI
+        // 🚨 切换到高优先级通知，触发全屏 UI
         val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(NOTIF_ID_ALERT, createAlertNotification())
+        nm.notify(1001, createNotification())
 
         rtcRunnable = Runnable {
-            Log.e("RTC", "10 seconds passed, starting RTC call...")
+            Log.e("RTC", "Starting WebRTC...")
             stopAlertSound() 
-            // 移除报警通知，因为它已经没用了
-            nm.cancel(NOTIF_ID_ALERT)
-
-            // 更新 Service 通知类型为 MICROPHONE，但不带全屏意图
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIF_ID_MONITOR, 
-                    createMonitorNotification(), 
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                )
-            }
-
             rtcClient.sendFallAlert(userId = "CG-003")
             rtcClient.startWebRtcCall()
 
@@ -202,58 +209,11 @@ class FallDetectService : Service(), SensorEventListener {
 
         strongVibrate()
         alertStreamId = soundPool.play(alertSoundId, 1f, 1f, 1, 0, 1f)
-    }
 
-    private fun resetAll() {
-        Log.e("FALL", "Resetting all states...")
-        rtcClient.endCall()
-        
-        // 取消报警通知 ID
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.cancel(NOTIF_ID_ALERT)
-
-        resetStateVariables()
-        alertTriggered.set(false)
-        lastResetTime = System.currentTimeMillis()
-        
-        // 恢复 Service 为普通监测状态
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID_MONITOR, createMonitorNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            nm.notify(NOTIF_ID_MONITOR, createMonitorNotification())
-        }
-    }
-
-    private fun createMonitorNotification(): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID_MONITOR)
-            .setSmallIcon(android.R.drawable.ic_dialog_alert)
-            .setContentTitle("CareLink")
-            .setContentText(if (alertTriggered.get()) "检测到疑似跌倒..." else "跌倒监测运行中")
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true)
-            .build()
-    }
-
-    @SuppressLint("FullScreenIntentPolicy")
-    private fun createAlertNotification(): Notification {
+        // 双重保险：显式启动 Activity
         val intent = Intent(this, CountdownActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 
-            0, 
-            intent, 
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        return NotificationCompat.Builder(this, CHANNEL_ID_ALERT)
-            .setSmallIcon(android.R.drawable.ic_dialog_alert)
-            .setContentTitle("🚨 紧急提醒")
-            .setContentText("检测到跌倒，即将发出求救！")
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setFullScreenIntent(pendingIntent, true)
-            .setOngoing(true)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .build()
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        startActivity(intent)
     }
 
     private fun stopAlertSound() {
@@ -275,6 +235,17 @@ class FallDetectService : Service(), SensorEventListener {
         fallHandled = false
     }
 
+    private fun resetAll() {
+        Log.e("FALL", "Resetting all states...")
+        resetStateVariables()
+        alertTriggered = false
+        lastResetTime = System.currentTimeMillis()
+        
+        // ✅ 重置回低优先级监测渠道
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(1001, createNotification())
+    }
+
     private fun strongVibrate() {
         val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             (getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
@@ -282,5 +253,31 @@ class FallDetectService : Service(), SensorEventListener {
             @Suppress("DEPRECATION") getSystemService(VIBRATOR_SERVICE) as Vibrator
         }
         vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 400, 200, 400), intArrayOf(0, 255, 0, 255), -1))
+    }
+
+    @SuppressLint("FullScreenIntentPolicy")
+    private fun createNotification(): Notification {
+        // 根据状态选择渠道
+        val currentChannelId = if (alertTriggered) CHANNEL_ID_ALERT else CHANNEL_ID_MONITOR
+        
+        val builder = NotificationCompat.Builder(this, currentChannelId)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle("CareLink 跌倒提醒")
+            .setContentText(if (alertTriggered) "检测到跌倒！" else "跌倒监测运行中")
+            .setOngoing(true)
+            .setOnlyAlertOnce(!alertTriggered) // 监测状态不响铃
+
+        if (alertTriggered) {
+            val intent = Intent(this, CountdownActivity::class.java)
+            val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            builder.setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setFullScreenIntent(pendingIntent, true)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        } else {
+            builder.setPriority(NotificationCompat.PRIORITY_LOW)
+        }
+
+        return builder.build()
     }
 }

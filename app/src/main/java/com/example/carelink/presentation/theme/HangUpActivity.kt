@@ -1,10 +1,7 @@
 package com.example.carelink.presentation.theme
 
 import android.app.Activity
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -12,7 +9,6 @@ import android.util.Log
 import android.view.WindowManager
 import android.widget.ImageButton
 import android.widget.TextView
-import androidx.core.content.ContextCompat
 import com.example.carelink.R
 
 class HangUpActivity : Activity() {
@@ -35,17 +31,10 @@ class HangUpActivity : Activity() {
         }
     }
 
-    // 监听重置广播，用于自动关闭页面
-    private val resetReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            Log.e("RTC", "HangUpActivity received reset signal. Finishing...")
-            finish()
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        // 保持屏幕常亮并在锁屏上显示
         window.addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
@@ -58,35 +47,23 @@ class HangUpActivity : Activity() {
         tvSec = findViewById(R.id.tvSec)
         btnHangUp = findViewById(R.id.btnHangUp)
 
-        // 注册监听器
-        val filter = IntentFilter("ACTION_FALL_ALERT_RESET")
-        ContextCompat.registerReceiver(
-            this,
-            resetReceiver,
-            filter,
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
-
         btnHangUp.setOnClickListener {
             Log.d("RTC", "User clicked Hang Up")
             sendResetBroadcast()
-            // 注意：这里不需要立刻 finish()，因为发送广播后，resetReceiver 会收到信号并处理 finish()
+            finish()
         }
 
         handler.post(timerRunnable)
     }
 
     private fun sendResetBroadcast() {
-        Log.e("FALL", ">>> SENDING RESET BROADCAST FROM HANGUP BUTTON <<<")
+        Log.e("FALL", ">>> SENDING RESET BROADCAST FROM HANGUP <<<")
         val intent = Intent("ACTION_FALL_ALERT_RESET")
         intent.setPackage(packageName)
         sendBroadcast(intent)
     }
 
     override fun onDestroy() {
-        try {
-            unregisterReceiver(resetReceiver)
-        } catch (e: Exception) {}
         handler.removeCallbacks(timerRunnable)
         super.onDestroy()
     }
