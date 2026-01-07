@@ -1,6 +1,7 @@
 package com.example.carelink.presentation
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioManager
 import android.util.Log
 import okhttp3.*
@@ -16,6 +17,8 @@ class RtcSignalClient(private val context: Context) {
     private var peerConnection: PeerConnection? = null
     private var factory: PeerConnectionFactory? = null
     private var localAudioTrack: AudioTrack? = null
+    private var audioSource: AudioSource? = null
+    private var currentCallId: String? = null
 
     private val client: OkHttpClient = createUnsafeOkHttpClient()
     private val request = Request.Builder().url("ws://10.27.201.100:25101").build()
@@ -50,9 +53,6 @@ class RtcSignalClient(private val context: Context) {
         }
     }
 
-    /**
-     * ⭐ 仅创建 Track，不创建 Stream 对象，以符合 Unified Plan
-     */
     private fun createLocalAudioTrack() {
         if (factory == null) return
         
@@ -62,7 +62,7 @@ class RtcSignalClient(private val context: Context) {
             mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
         }
         
-        val audioSource = factory!!.createAudioSource(audioConstraints)
+        audioSource = factory!!.createAudioSource(audioConstraints)
         localAudioTrack = factory!!.createAudioTrack("ARDAMS0", audioSource)
         localAudioTrack?.setEnabled(true)
     }
@@ -81,15 +81,6 @@ class RtcSignalClient(private val context: Context) {
         webSocket?.send(json.toString())
     }
 
-    fun sendFallAlert(userId: String) {
-        val json = JSONObject().apply {
-            put("type", "FALL_ALERT")
-            put("userId", userId)
-            put("timestamp", System.currentTimeMillis())
-        }
-        webSocket?.send(json.toString())
-    }
-
     fun startWebRtcCall() {
         Log.e("RTC", "🚀 Starting Call (Unified Plan)...")
         
@@ -100,7 +91,6 @@ class RtcSignalClient(private val context: Context) {
 
         createLocalAudioTrack()
 
-        // ⭐ 必须明确指定 UnifiedPlan
         val rtcConfig = PeerConnection.RTCConfiguration(
             listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
         ).apply {
@@ -136,7 +126,6 @@ class RtcSignalClient(private val context: Context) {
             override fun onTrack(p0: RtpTransceiver?) {}
         })
 
-        // ⭐ 核心修复：使用 addTrack 并指定 Stream Label，不再使用 addStream
         localAudioTrack?.let {
             peerConnection?.addTrack(it, listOf("ARDAMS"))
         }
@@ -149,10 +138,11 @@ class RtcSignalClient(private val context: Context) {
         peerConnection?.createOffer(object : SdpObserver {
             override fun onCreateSuccess(desc: SessionDescription) {
                 peerConnection?.setLocalDescription(this, desc)
+                currentCallId = "call_${System.currentTimeMillis()}"
                 val json = JSONObject().apply {
                     put("type", "start_call")
                     put("to", targetClientId)
-                    put("callId", "call_${System.currentTimeMillis()}")
+                    put("callId", currentCallId)
                     put("offer", JSONObject().apply {
                         put("sdp", desc.description)
                         put("type", "offer")
@@ -167,6 +157,52 @@ class RtcSignalClient(private val context: Context) {
         }, constraints)
     }
 
+    fun hangup() {
+        Log.d("RTC", "Hangup: Sending end_call to $targetClientId")
+        val json = JSONObject().apply {
+            put("type", "end_call")
+            put("to", targetClientId)
+            currentCallId?.let { put("callId", it) }
+        }
+        webSocket?.send(json.toString())
+        closeInternal()
+    }
+
+    private fun closeInternal() {
+        Log.d("RTC", "Cleaning up WebRTC resources...")
+        try {
+            localAudioTrack?.setEnabled(false)
+            localAudioTrack?.dispose()
+            localAudioTrack = null
+
+            audioSource?.dispose()
+            audioSource = null
+
+            peerConnection?.dispose()
+            peerConnection = null
+            
+            currentCallId = null
+
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            audioManager.mode = AudioManager.MODE_NORMAL
+            audioManager.isMicrophoneMute = false
+            audioManager.isSpeakerphoneOn = false
+            
+            Log.d("RTC", "Microphone and WebRTC released successfully")
+        } catch (e: Exception) {
+            Log.e("RTC", "Error during closeInternal", e)
+        }
+    }
+
+    fun sendFallAlert(userId: String) {
+        val json = JSONObject().apply {
+            put("type", "FALL_ALERT")
+            put("userId", userId)
+            put("timestamp", System.currentTimeMillis())
+        }
+        webSocket?.send(json.toString())
+    }
+
     private val socketListener = object : WebSocketListener() {
         override fun onOpen(ws: WebSocket, response: Response) {
             Log.d("RTC", "✅ WS Connected")
@@ -174,7 +210,7 @@ class RtcSignalClient(private val context: Context) {
             joinRoom()
         }
 
-        override fun onMessage(webSocket: WebSocket, text: String) {
+        override fun onMessage(ws: WebSocket, text: String) {
             try {
                 val json = JSONObject(text)
                 when (json.optString("type")) {
@@ -197,6 +233,15 @@ class RtcSignalClient(private val context: Context) {
                         )
                         peerConnection?.addIceCandidate(candidate)
                     }
+                    // ⭐ 处理远程挂断：发出全局广播并清理本地资源
+                    "end_call", "reject_call" -> {
+                        Log.d("RTC", "Remote ended call, broadcasting reset")
+                        val intent = Intent("ACTION_FALL_ALERT_RESET")
+                        intent.setPackage(context.packageName)
+                        context.sendBroadcast(intent)
+                        
+                        closeInternal()
+                    }
                 }
             } catch (e: Exception) {}
         }
@@ -204,6 +249,7 @@ class RtcSignalClient(private val context: Context) {
         override fun onFailure(ws: WebSocket, t: Throwable, r: Response?) {
             Log.e("RTC", "❌ WS Failure", t)
             webSocket = null
+            closeInternal()
         }
     }
 

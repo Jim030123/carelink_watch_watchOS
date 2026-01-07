@@ -1,7 +1,10 @@
 package com.example.carelink.presentation.theme
 
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -31,10 +34,17 @@ class HangUpActivity : Activity() {
         }
     }
 
+    // ⭐ 监听重置广播，实现同步关闭界面
+    private val resetReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d("RTC", "HangUpActivity received remote hangup, finishing...")
+            finish()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // 保持屏幕常亮并在锁屏上显示
         window.addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
                     WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
@@ -48,10 +58,14 @@ class HangUpActivity : Activity() {
         btnHangUp = findViewById(R.id.btnHangUp)
 
         btnHangUp.setOnClickListener {
-            Log.d("RTC", "User clicked Hang Up")
+            Log.d("RTC", "User clicked Hang Up button")
             sendResetBroadcast()
             finish()
         }
+
+        // 注册接收器
+        val filter = IntentFilter("ACTION_FALL_ALERT_RESET")
+        registerReceiver(resetReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
 
         handler.post(timerRunnable)
     }
@@ -65,6 +79,9 @@ class HangUpActivity : Activity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(timerRunnable)
+        try {
+            unregisterReceiver(resetReceiver)
+        } catch (e: Exception) {}
         super.onDestroy()
     }
 }

@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    
+    <!-- ⭐ 允许在其他应用上层显示界面，解决后台启动 Activity 被拦截的问题 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
 
     <!-- 接收开机广播所需权限 -->
@@ -57,17 +60,21 @@
             android:name=".presentation.CountdownActivity"
             android:exported="false"
             android:showWhenLocked="true"
+            android:showForAllUsers="true"
             android:turnScreenOn="true"
             android:excludeFromRecents="true"
-            android:launchMode="singleInstance" />
+            android:launchMode="singleInstance"
+            android:configChanges="orientation|screenSize|screenLayout" />
 
         <activity
             android:name=".presentation.theme.HangUpActivity"
             android:exported="false"
             android:showWhenLocked="true"
+            android:showForAllUsers="true"
             android:turnScreenOn="true"
             android:excludeFromRecents="true"
-            android:launchMode="singleInstance" />
+            android:launchMode="singleInstance"
+            android:configChanges="orientation|screenSize|screenLayout" />
 
         <uses-library
             android:name="com.google.android.wearable"
