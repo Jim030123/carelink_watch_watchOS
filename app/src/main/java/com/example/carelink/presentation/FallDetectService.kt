@@ -54,6 +54,14 @@ class FallDetectService : Service(), SensorEventListener {
             Log.e("FALL", ">>> RESET SIGNAL RECEIVED <<<")
             stopAlertSound()
             cancelRtcSending()
+            
+            // ⭐ 核心修复：通知 RTC 客户端执行挂断动作并发送 end_call 信令
+            try {
+                rtcClient.hangup()
+            } catch (e: Exception) {
+                Log.e("FALL", "RTC hangup call failed: ${e.message}")
+            }
+            
             resetAll()
         }
     }

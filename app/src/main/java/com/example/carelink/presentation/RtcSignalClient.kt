@@ -157,14 +157,29 @@ class RtcSignalClient(private val context: Context) {
         }, constraints)
     }
 
+    /**
+     * ⭐ 加固后的挂断逻辑，确保 end_call 指令成功送达
+     */
     fun hangup() {
-        Log.d("RTC", "Hangup: Sending end_call to $targetClientId")
+        if (webSocket == null) {
+            Log.e("RTC", "Hangup aborted: WebSocket is NULL")
+            closeInternal()
+            return
+        }
+
+        Log.d("RTC", ">>> Executing Hangup. Target: $targetClientId, CallId: $currentCallId")
+        
         val json = JSONObject().apply {
             put("type", "end_call")
             put("to", targetClientId)
-            currentCallId?.let { put("callId", it) }
+            // 即便 currentCallId 为空也要发，传个占位符，服务器会转发给 targetClientId
+            put("callId", currentCallId ?: "pending_${System.currentTimeMillis()}")
+            put("from", myClientId)
         }
-        webSocket?.send(json.toString())
+        
+        val sent = webSocket?.send(json.toString()) ?: false
+        Log.e("RTC", ">>> end_call signal sent: $sent")
+
         closeInternal()
     }
 
@@ -233,13 +248,11 @@ class RtcSignalClient(private val context: Context) {
                         )
                         peerConnection?.addIceCandidate(candidate)
                     }
-                    // ⭐ 处理远程挂断：发出全局广播并清理本地资源
                     "end_call", "reject_call" -> {
                         Log.d("RTC", "Remote ended call, broadcasting reset")
                         val intent = Intent("ACTION_FALL_ALERT_RESET")
                         intent.setPackage(context.packageName)
                         context.sendBroadcast(intent)
-                        
                         closeInternal()
                     }
                 }
