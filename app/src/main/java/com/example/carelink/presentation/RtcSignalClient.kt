@@ -21,6 +21,7 @@ class RtcSignalClient(private val context: Context) {
     private var currentCallId: String? = null
 
     private val client: OkHttpClient = createUnsafeOkHttpClient()
+    // ⭐ 纠正错误：将服务器地址恢复到原始值
     private val request = Request.Builder().url("ws://10.179.86.100:25101").build()
     private var webSocket: WebSocket? = null
     
