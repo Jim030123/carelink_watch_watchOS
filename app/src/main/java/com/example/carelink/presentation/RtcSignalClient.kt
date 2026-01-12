@@ -21,7 +21,7 @@ class RtcSignalClient(private val context: Context) {
     private var currentCallId: String? = null
 
     private val client: OkHttpClient = createUnsafeOkHttpClient()
-    private val request = Request.Builder().url("ws://10.27.201.100:25101").build()
+    private val request = Request.Builder().url("ws://10.179.86.100:25101").build()
     private var webSocket: WebSocket? = null
     
     private val myClientId = "Watch-003"

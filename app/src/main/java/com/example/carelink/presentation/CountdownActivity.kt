@@ -1,15 +1,16 @@
 package com.example.carelink.presentation
 
-import android.app.Activity
 import android.content.Intent
 import android.os.*
 import android.util.Log
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.TextView
+import androidx.activity.ComponentActivity
 import com.example.carelink.R
 
-class CountdownActivity : Activity() {
+// ⭐ 关键修复：彻底移除 AmbientModeSupport，回到一个干净的状态
+class CountdownActivity : ComponentActivity() {
 
     private var remaining = 10
     private var resetSent = false
@@ -27,7 +28,6 @@ class CountdownActivity : Activity() {
             if (remaining <= 0) {
                 Log.w("FALL", "Countdown finished - Proceeding to Emergency Call")
                 isTimeout = true
-                // 🛑 核心修改：倒计时结束不再发送 Reset 广播，让 Service 继续执行通话逻辑
                 finish()
             } else {
                 handler.postDelayed(this, 1000)
@@ -36,13 +36,20 @@ class CountdownActivity : Activity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        Log.e("FALL_ACTIVITY_LIFECYCLE", "!!! CountdownActivity onCreate CALLED !!!")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+
         super.onCreate(savedInstanceState)
 
-        // 保持屏幕常亮并在锁屏上显示
         window.addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
         )
 
         setContentView(R.layout.activity_countdown)
@@ -54,7 +61,7 @@ class CountdownActivity : Activity() {
         updateText()
 
         okButton.setOnClickListener {
-            Log.d("FALL", "User clicked 'I'm OK' - Canceling alert")
+            Log.d("FALL", "User clicked \'I\'m OK\' - Canceling alert")
             sendResetOnce()
             finish()
         }
@@ -62,15 +69,9 @@ class CountdownActivity : Activity() {
         handler.postDelayed(countdownRunnable, 1000)
     }
 
-    /**
-     * 修改 onDestroy 逻辑：
-     * 只有当用户主动关闭（如点击按钮或手势返回）时才重置。
-     * 如果是倒计时超时自动关闭，则不触发重置，以允许通话继续。
-     */
     override fun onDestroy() {
-        Log.d("FALL", "CountdownActivity onDestroy (isTimeout=$isTimeout)")
+        Log.d("FALL_ACTIVITY_LIFECYCLE", "CountdownActivity onDestroy (isTimeout=$isTimeout)")
         if (!isTimeout) {
-            // 如果不是因为超时结束的，说明用户可能手动取消了（点按钮或返回键）
             sendResetOnce()
         }
         handler.removeCallbacksAndMessages(null)

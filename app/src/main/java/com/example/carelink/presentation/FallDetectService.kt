@@ -28,6 +28,8 @@ class FallDetectService : Service(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
 
+    private var wakeLock: PowerManager.WakeLock? = null
+
     private val FREE_FALL_THRESHOLD = 5f
     private val IMPACT_THRESHOLD = 25f
     private val STILL_THRESHOLD = 11f
@@ -40,7 +42,7 @@ class FallDetectService : Service(), SensorEventListener {
     private var impactDetected = false
     private var stillStartTime = 0L
     private var fallHandled = false
-    private var fallStartTime = 0L 
+    private var fallStartTime = 0L
 
     private lateinit var soundPool: SoundPool
     private var alertSoundId = 0
@@ -55,7 +57,6 @@ class FallDetectService : Service(), SensorEventListener {
             stopAlertSound()
             cancelRtcSending()
             
-            // ⭐ 核心修复：通知 RTC 客户端执行挂断动作并发送 end_call 信令
             try {
                 rtcClient.hangup()
             } catch (e: Exception) {
@@ -73,10 +74,8 @@ class FallDetectService : Service(), SensorEventListener {
         rtcClient = RtcSignalClient(this)
         rtcClient.connect()
 
-        // 1. 预先创建两个渠道
         createNotificationChannels()
 
-        // 2. 初始使用监测渠道启动前台服务
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 1001, 
@@ -88,12 +87,7 @@ class FallDetectService : Service(), SensorEventListener {
         }
 
         val filter = IntentFilter("ACTION_FALL_ALERT_RESET")
-        ContextCompat.registerReceiver(
-            this,
-            resetReceiver,
-            filter,
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
+        ContextCompat.registerReceiver(this, resetReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ALARM)
@@ -113,22 +107,12 @@ class FallDetectService : Service(), SensorEventListener {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NotificationManager::class.java)
             
-            // 监测渠道：静默，低优先级
-            val monitorChannel = NotificationChannel(
-                CHANNEL_ID_MONITOR, 
-                "跌倒监测状态", 
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
+            val monitorChannel = NotificationChannel(CHANNEL_ID_MONITOR, "跌倒监测状态", NotificationManager.IMPORTANCE_LOW).apply {
                 description = "显示跌倒监测是否正在运行"
                 setShowBadge(false)
             }
             
-            // 报警渠道：高优先级，必须弹出
-            val alertChannel = NotificationChannel(
-                CHANNEL_ID_ALERT, 
-                "跌倒紧急报警", 
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
+            val alertChannel = NotificationChannel(CHANNEL_ID_ALERT, "跌倒紧急报警", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "检测到跌倒时的紧急提醒"
                 enableVibration(true)
                 setBypassDnd(true)
@@ -143,6 +127,7 @@ class FallDetectService : Service(), SensorEventListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
+        releaseWakeLock()
         stopAlertSound()
         cancelRtcSending()
         try {
@@ -193,35 +178,43 @@ class FallDetectService : Service(), SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
+    @SuppressLint("WakelockTimeout")
     private fun triggerFallAlert() {
         if (alertTriggered) return
         alertTriggered = true
 
-        Log.e("FALL", "!!! FALL ALERT TRIGGERED !!!")
+        Log.e("FALL", "!!! FALL ALERT TRIGGERED - ATTEMPTING TO SHOW UI FIRST !!!")
 
-        // 🚨 切换到高优先级通知，触发全屏 UI
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(1001, createNotification())
-
-        rtcRunnable = Runnable {
-            Log.e("RTC", "Starting WebRTC...")
-            stopAlertSound() 
-            rtcClient.sendFallAlert(userId = "CG-003")
-            rtcClient.startWebRtcCall()
-
-            val hangUpIntent = Intent(this, HangUpActivity::class.java)
-            hangUpIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            startActivity(hangUpIntent)
-        }
-        mainHandler.postDelayed(rtcRunnable!!, 10000)
-
-        strongVibrate()
-        alertStreamId = soundPool.play(alertSoundId, 1f, 1f, 1, 0, 1f)
-
-        // 双重保险：显式启动 Activity
+        // 黄金法则：第一步，且只做这一步：唤醒屏幕并拉起 UI
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "CareLink::FallAlertWakeLock").apply { acquire() }
+        
         val intent = Intent(this, CountdownActivity::class.java)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         startActivity(intent)
+        
+        // 发送高优先级通知作为备用方案
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(1001, createNotification())
+
+        // 第二步：将所有其他操作延迟执行，避免干扰 UI 线程
+        mainHandler.post {
+            Log.d("FALL", "Executing secondary actions (sound, vibrate, etc.)")
+            strongVibrate()
+            alertStreamId = soundPool.play(alertSoundId, 1f, 1f, 1, 0, 1f)
+
+            rtcRunnable = Runnable {
+                Log.e("RTC", "Starting WebRTC...")
+                stopAlertSound() 
+                rtcClient.sendFallAlert(userId = "CG-003")
+                rtcClient.startWebRtcCall()
+
+                val hangUpIntent = Intent(this, HangUpActivity::class.java)
+                hangUpIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                startActivity(hangUpIntent)
+            }
+            mainHandler.postDelayed(rtcRunnable!!, 10000)
+        }
     }
 
     private fun stopAlertSound() {
@@ -245,13 +238,21 @@ class FallDetectService : Service(), SensorEventListener {
 
     private fun resetAll() {
         Log.e("FALL", "Resetting all states...")
+        releaseWakeLock()
         resetStateVariables()
         alertTriggered = false
         lastResetTime = System.currentTimeMillis()
         
-        // ✅ 重置回低优先级监测渠道
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(1001, createNotification())
+    }
+
+    private fun releaseWakeLock() {
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+            wakeLock = null
+            Log.d("FALL", "WakeLock released.")
+        }
     }
 
     private fun strongVibrate() {
@@ -265,7 +266,6 @@ class FallDetectService : Service(), SensorEventListener {
 
     @SuppressLint("FullScreenIntentPolicy")
     private fun createNotification(): Notification {
-        // 根据状态选择渠道
         val currentChannelId = if (alertTriggered) CHANNEL_ID_ALERT else CHANNEL_ID_MONITOR
         
         val builder = NotificationCompat.Builder(this, currentChannelId)
@@ -273,11 +273,12 @@ class FallDetectService : Service(), SensorEventListener {
             .setContentTitle("CareLink 跌倒提醒")
             .setContentText(if (alertTriggered) "检测到跌倒！" else "跌倒监测运行中")
             .setOngoing(true)
-            .setOnlyAlertOnce(!alertTriggered) // 监测状态不响铃
+            .setOnlyAlertOnce(!alertTriggered)
 
         if (alertTriggered) {
             val intent = Intent(this, CountdownActivity::class.java)
-            val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            // ⭐ 简化 PendingIntent，只保留最核心的 Flag
+            val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
             builder.setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setFullScreenIntent(pendingIntent, true)
